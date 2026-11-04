@@ -70,7 +70,6 @@ export const HITLPanel: React.FC<HITLPanelProps> = ({
       <div className="p-3.5 rounded-lg border border-primary/20 bg-primary/5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold tracking-wider uppercase bg-primary/20 text-primary border border-primary/30">
-            EXPERIMENT 2
           </span>
           <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
             <UserCheck className="w-3.5 h-3.5 text-primary" />

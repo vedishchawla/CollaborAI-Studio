@@ -114,7 +114,7 @@ export const HITLModal: React.FC<HITLModalProps> = ({
         <div className="px-6 py-2.5 bg-primary/5 border-b border-border text-[11px] text-muted-foreground flex items-center justify-between">
           <span className="font-medium text-foreground flex items-center gap-1.5">
             <FileCheck className="w-3.5 h-3.5 text-primary" />
-            EXPERIMENT 2: Human-in-the-Loop (HITL) Checkpoint Gate
+            Human-in-the-Loop (HITL) Checkpoint Gate
           </span>
           <span>Stage: <strong className="text-foreground">{checkpoint.stage}</strong></span>
         </div>

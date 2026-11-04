@@ -124,7 +124,7 @@ export function GoalInputPanel({ scenarios, isLoading, onStartRun }: Props) {
           <label className="flex items-center justify-between gap-3 text-xs cursor-pointer">
             <span className="flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-              <span>MCP Tools (Exp 1)</span>
+              <span>MCP Tools</span>
             </span>
             <input type="checkbox" role="switch" aria-label="MCP Tools" className="toggle" checked={enableMcp} onChange={e=>setEnableMcp(e.target.checked)}/>
           </label>
@@ -132,7 +132,7 @@ export function GoalInputPanel({ scenarios, isLoading, onStartRun }: Props) {
           <label className="flex items-center justify-between gap-3 text-xs cursor-pointer">
             <span className="flex items-center gap-1.5">
               <UserCheck className="w-3.5 h-3.5 text-amber-400" />
-              <span>HITL Approval Gates (Exp 2)</span>
+              <span>HITL Approval Gates</span>
             </span>
             <input type="checkbox" role="switch" aria-label="HITL Gates" className="toggle" checked={enableHitlGates} onChange={e=>setEnableHitlGates(e.target.checked)}/>
           </label>
