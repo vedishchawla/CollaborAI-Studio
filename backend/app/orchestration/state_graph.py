@@ -226,6 +226,8 @@ CONSTRAINTS: {[c.description for c in state.constraints]}
 SHARED BLACKBOARD (PEER FINDINGS):
 {blackboard_context}
 
+{mcp_context if mcp_context else ""}
+
 YOUR MANDATE:
 Deliver your independent domain findings. Provide:
 1. Core substantive claim.
@@ -271,6 +273,19 @@ Deliver your independent domain findings. Provide:
             state.execution_events.append(finding_event)
             if event_callback:
                 event_callback(finding_event)
+
+        if self.enable_mcp_tools:
+            state.mcp_tools_summary = self.mcp_client.get_invocation_summary()
+            summary_event = ExecutionEvent(
+                event_id=f"EVT-{uuid.uuid4().hex[:8]}",
+                run_id=state.run_id,
+                event_type="MCP_TOOLS_SUMMARY",
+                title="MCP Tools Execution Summary",
+                data=state.mcp_tools_summary
+            )
+            state.execution_events.append(summary_event)
+            if event_callback:
+                event_callback(summary_event)
 
         return state
 
