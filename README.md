@@ -31,28 +31,88 @@ CollaborAI coordinates a specialized team of autonomous agents—each with disti
 
 ## 🏛 System Architecture
 
-The deliberation lifecycle executes as a **Directed Acyclic Graph (DAG) State Machine** decoupled from an asynchronous non-blocking event loop:
+The deliberation lifecycle executes as a **Directed Acyclic Graph (DAG) State Machine** decoupled from an asynchronous non-blocking event loop, augmented with **Model Context Protocol (MCP)** tool execution and **Human-in-the-Loop (HITL)** approval gates:
 
 ```mermaid
 graph TD
     User([User Goal & Constraints]) --> Decompose[1. Goal Decomposition Node]
     Decompose --> Specialists[2. Specialist Execution Tier]
     
+    subgraph "Model Context Protocol (MCP) Tools"
+        Specialists <-->|Tool Invocations| MCP[MCP Tool Server / Registry]
+        MCP --- T1[(Web Search)]
+        MCP --- T2[(Regulatory DB)]
+        MCP --- T3[(Financial Calc)]
+        MCP --- T4[(Risk Matrix)]
+        MCP --- T5[(Market Data)]
+    end
+
     subgraph "Blackboard Architecture"
-        Specialists -->|Post Findings| Blackboard[(Shared State Blackboard)]
+        Specialists -->|Post Grounded Findings| Blackboard[(Shared State Blackboard)]
         Blackboard --> Detect[3. Conflict Detection Engine]
     end
 
     Detect -->|No Conflicts| Audit[5. Stale Assumption & Drift Check]
-    Detect -->|Tension Identified| Negotiate[4. Multi-Agent Negotiation Rounds]
+    Detect -->|Tension Identified| Gate1{HITL Checkpoint?}
     
+    Gate1 -->|Approval Required| ChkPre[HITL: Pre-Negotiation Gate]
+    ChkPre -->|Human Approved| Negotiate[4. Multi-Agent Negotiation Rounds]
+    Gate1 -->|Autonomous| Negotiate
+
     Negotiate -->|Consensus Formulated| Audit
     Negotiate -->|Irreconcilable Deadlock| Escalate[4b. Human Escalation Node]
     
     Escalate -->|Executive Guidance Injected| Audit
-    Audit --> Synthesize[6. Strategic Synthesis & Attribution Node]
+    Audit --> Gate2{HITL Pre-Synthesis?}
+    Gate2 -->|Review Gate| ChkSynth[HITL: Final Sign-Off Gate]
+    ChkSynth -->|Approved / Modified| Synthesize[6. Strategic Synthesis & Attribution Node]
+    Gate2 -->|Autonomous| Synthesize
+
     Synthesize --> Output([Final Recommendation & Traceability Ledger])
 ```
+
+---
+
+## 🧪 Academic Experiment Mapping
+
+This platform directly maps to course requirements for **Advanced Multi-Agent Systems & Decision Intelligence**:
+
+### 🔬 Experiment 1: Model Context Protocol (MCP) Multi-Agent Tool Integration
+* **Objective**: Evaluate how grounded external tool access mitigates LLM hallucination and enables specialists to formulate quantifiable assertions with empirical backing.
+* **Architecture (`backend/app/mcp/`)**:
+  * `protocol.py`: Strongly-typed MCP schema models (`MCPTool`, `MCPToolCall`, `MCPToolResult`, `MCPToolParameter`) compliant with the Model Context Protocol specification.
+  * `registry.py`: Central tool registry providing categorization, discovery, and async execution dispatch.
+  * `tools.py`: 5 general-purpose domain-agnostic tools (custom tools can be registered at runtime):
+    1. **`web_search`**: Web information retrieval for grounding claims in external evidence across any domain.
+    2. **`text_summarizer`**: Extractive text summarization supporting concise, detailed, and bullet-point styles.
+    3. **`calculator`**: Universal numeric computation — arithmetic, percentages, ratios, ROI, NPV, breakeven, and statistics.
+    4. **`data_analyzer`**: Structured data analysis with summary statistics, group-by aggregation, and comparisons.
+    5. **`document_retriever`**: Knowledge-base and document-store retrieval for grounding analysis in internal documents.
+  * `client.py`: Dynamic tool selection client that inspects the registered tool catalog and selects relevant tools based on agent needs and goal context — no hardcoded domain routing.
+* **UI Verification**:
+  * Dedicated **MCP Tools tab** in the workspace.
+  * Live feed of all agent tool invocations with status pills, execution duration (ms), and payload inspect drawers.
+  * Interactive **MCP Tool Test Sandbox** allowing human evaluators to manually invoke tools with custom JSON payloads.
+
+---
+
+### 🔬 Experiment 2: Human-in-the-Loop (HITL) Multi-Agent Steering & Checkpoint Gates
+* **Objective**: Implement configurable human intervention gates across the multi-agent deliberation lifecycle to prevent unconstrained cognitive drift, review high-stakes compromises, and inject executive guidance.
+* **Architecture (`backend/app/hitl/`)**:
+  * `checkpoint.py`: Checkpoint engine (`HITLCheckpointManager`) managing stateful approval gates:
+    1. **`findings_review`**: Human review gate following specialist analysis before conflict cross-auditing.
+    2. **`pre_negotiation_approval`**: Human sign-off on conflict debate parameters before concessions begin.
+    3. **`post_negotiation_review`**: Human review of negotiated Pareto compromises and concessions.
+    4. **`pre_synthesis_approval`**: Executive sign-off gating final strategic recommendation generation.
+  * **Steering Modes (`CheckpointDecision`)**:
+    * **Approve**: Unblocks execution with zero friction.
+    * **Modify**: Injects parameter overrides (e.g. timeline modifications, budget revisions) directly into agent state.
+    * **Reject**: Rejects agent findings or compromises and mandates agent re-evaluation with explicit human guidance.
+  * State Machine Integration (`runner.py`): Safe pipeline pause (`is_paused_for_hitl = True`) and seamless asynchronous resumption (`resume_from_checkpoint`).
+* **UI Verification**:
+  * Dedicated **HITL Approvals tab** showing pending action items and an immutable audit ledger of all human interventions.
+  * Visual **HITL Checkpoint Modal** displaying checkpoint context, payload metrics, and decision steering options.
+  * Toggle controls in the **Goal Input Panel** to enable/disable HITL checkpoints before launch.
 
 ---
 
@@ -91,14 +151,22 @@ Incoming prompts are screened in real time against directive overrides (*"Ignore
 multi-agent-colab/
 ├── backend/                       # FastAPI High-Performance Backend
 │   ├── app/
-│   │   ├── api/                   # REST Routes (/api/runs, /api/scenarios) & WebSocket Stream
+│   │   ├── api/                   # REST Routes (/api/runs, /api/mcp, /api/hitl) & WebSocket
 │   │   ├── db/                    # SQLAlchemy Async + SQLite Engine (collaborai.db)
 │   │   ├── guardrails/            # Prompt Injection Defense & Sanitization Engine
+│   │   ├── hitl/                  # Human-in-the-Loop Checkpoint Engine (Experiment 2)
+│   │   │   ├── checkpoint.py      # Checkpoint Manager, Gates & Decision Ledger
+│   │   │   └── __init__.py
 │   │   ├── llm/                   # Groq LPU Provider, Rate Limiters & Mock Simulator
+│   │   ├── mcp/                   # Model Context Protocol Tools (Experiment 1)
+│   │   │   ├── client.py          # Dynamic Agent Tool Client & Selection Engine
+│   │   │   ├── protocol.py        # MCP Tool Schemas & Registry
+│   │   │   ├── tools.py           # 5 General-Purpose Tools (Search, Summarizer, Calculator, Analyzer, Retriever)
+│   │   │   └── __init__.py
 │   │   ├── orchestration/         # State Graph DAG (state_graph.py) & Runner (runner.py)
 │   │   ├── schemas/               # Central Blackboard State & Agent I/O Pydantic Contracts
 │   │   └── main.py                # FastAPI Application Factory & Middleware
-│   ├── tests/                     # 25 Comprehensive Pytest Unit & Integration Tests
+│   ├── tests/                     # Comprehensive Pytest Unit & Integration Tests
 │   └── requirements.txt           # Python Production Dependencies
 ├── frontend/                      # Modern TanStack React 19 Frontend
 │   ├── src/
@@ -197,7 +265,9 @@ cd backend
 python3 -m pytest tests/
 ```
 
-### Verified Test Matrix (25 Passing):
+### Verified Test Matrix:
+* `test_mcp_tools.py`: **(Exp 1)** Validates MCP tool protocol schemas, registry discovery, client dispatching, prompt formatting, and all 5 domain tools.
+* `test_hitl_checkpoints.py`: **(Exp 2)** Validates HITL checkpoint creation, pending queues, decision resolutions (Approve, Modify, Reject), and pipeline state transitions.
 * `test_agent_registry.py`: Validates specialist registration and persona seeding.
 * `test_api_endpoints.py`: Validates REST endpoints, scenario retrieval, and run lifecycle creation.
 * `test_arbitrary_goals_orchestration.py`: Proves end-to-end deliberation viability for unseen prompts.
@@ -217,6 +287,12 @@ python3 -m pytest tests/
 | `GET` | `/api/runs` | Fetch historical deliberation runs and statuses. |
 | `GET` | `/api/runs/{run_id}/state` | Fetch full snapshot of the shared state blackboard. |
 | `POST` | `/api/runs/{run_id}/resume` | Submit an executive human decision to unpause an escalated run. |
+| `GET` | `/api/mcp/tools` | **(Exp 1)** List all available MCP tools in the catalog. |
+| `POST` | `/api/mcp/invoke` | **(Exp 1)** Manually execute an MCP tool with custom arguments. |
+| `GET` | `/api/mcp/runs/{run_id}/tools` | **(Exp 1)** Retrieve all MCP tools invoked during a deliberation run. |
+| `GET` | `/api/hitl/runs/{run_id}/checkpoints` | **(Exp 2)** List all HITL checkpoints and status ledger for a run. |
+| `GET` | `/api/hitl/runs/{run_id}/pending` | **(Exp 2)** Retrieve currently blocking pending HITL checkpoints. |
+| `POST` | `/api/hitl/checkpoints/{id}/decide` | **(Exp 2)** Submit human steering decision (`approve`, `modify`, `reject`). |
 | `GET` | `/api/scenarios` | Retrieve preloaded demo scenarios and constraints. |
 | `GET` | `/api/health` | Inspect system health, active LLM connectivity, and telemetry. |
 | `WS` | `/api/ws/runs/{run_id}` | Bidirectional WebSocket stream for real-time deliberation events. |

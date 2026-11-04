@@ -151,6 +151,43 @@ export function useRunWebSocket(runId: string | null) {
               // No state mutation needed — event is logged in timeline
               break;
             }
+            case 'MCP_TOOL_INVOKED': {
+              const toolData = event.data as any;
+              if (toolData && !next.mcp_tool_calls?.some((t: any) => t.call_id === toolData.call_id)) {
+                next.mcp_tool_calls = [...(next.mcp_tool_calls || []), toolData];
+              }
+              break;
+            }
+            case 'MCP_TOOLS_SUMMARY': {
+              next.mcp_tools_summary = event.data;
+              break;
+            }
+            case 'HITL_PAUSED':
+            case 'HITL_CHECKPOINT_CREATED': {
+              const chk = event.data as any;
+              next.is_paused_for_hitl = true;
+              if (chk?.checkpoint_id) {
+                next.active_hitl_checkpoint_id = chk.checkpoint_id;
+                if (!next.hitl_checkpoints?.some((c: any) => c.checkpoint_id === chk.checkpoint_id)) {
+                  next.hitl_checkpoints = [...(next.hitl_checkpoints || []), chk];
+                }
+              }
+              break;
+            }
+            case 'HITL_RESUMED':
+            case 'HITL_CHECKPOINT_RESOLVED': {
+              next.is_paused_for_hitl = false;
+              next.active_hitl_checkpoint_id = undefined;
+              const chkData = event.data as any;
+              if (chkData?.checkpoint_id && next.hitl_checkpoints) {
+                next.hitl_checkpoints = next.hitl_checkpoints.map((c: any) =>
+                  c.checkpoint_id === chkData.checkpoint_id
+                    ? { ...c, status: chkData.decision || 'approved' }
+                    : c
+                );
+              }
+              break;
+            }
           }
 
           return next;

@@ -190,6 +190,79 @@ export interface SpecialistProfile {
   is_dynamic: boolean;
 }
 
+// ── MCP Tool Interfaces ──────────────────────────────────────────────────────
+
+export interface MCPToolParameter {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  description: string;
+  required: boolean;
+  default?: any;
+}
+
+export interface MCPTool {
+  name: string;
+  description: string;
+  category: 'research' | 'calculation' | 'data_retrieval' | 'document_analysis' | 'domain_lookup' | 'system';
+  parameters: MCPToolParameter[];
+  is_enabled: boolean;
+}
+
+export interface MCPToolResult {
+  call_id: string;
+  tool_name: string;
+  status: 'success' | 'error' | 'timeout';
+  result: any;
+  error_message?: string;
+  execution_time_ms: number;
+  timestamp: string;
+}
+
+export interface MCPToolCall {
+  call_id: string;
+  tool_name: string;
+  arguments: Record<string, any>;
+  requesting_agent: string;
+  run_id: string;
+  timestamp: string;
+}
+
+// ── HITL Checkpoint Interfaces ──────────────────────────────────────────────
+
+export interface CheckpointDecision {
+  checkpoint_id: string;
+  decision: 'approve' | 'reject' | 'modify' | 'skip';
+  feedback?: string;
+  modifications?: Record<string, any>;
+  decided_by: string;
+  decided_at: string;
+}
+
+export interface HITLCheckpoint {
+  checkpoint_id: string;
+  run_id: string;
+  checkpoint_type: 'findings_review' | 'pre_negotiation_approval' | 'post_negotiation_review' | 'pre_synthesis_approval' | 'custom_gate';
+  title: string;
+  description: string;
+  stage: string;
+  payload: Record<string, any>;
+  status: 'pending' | 'approved' | 'rejected' | 'modified' | 'skipped' | 'auto_approved';
+  decision?: CheckpointDecision;
+  is_blocking: boolean;
+  auto_approve_timeout_seconds?: number;
+  created_at: string;
+  resolved_at?: string;
+}
+
+export interface HITLConfig {
+  enabled: boolean;
+  enable_findings_review: boolean;
+  enable_pre_negotiation_approval: boolean;
+  enable_post_negotiation_review: boolean;
+  enable_pre_synthesis_approval: boolean;
+  auto_approve_timeout?: number;
+}
+
 export interface SharedState {
   run_id: string;
   goal: string;
@@ -205,6 +278,12 @@ export interface SharedState {
   escalations: HumanEscalation[];
   final_recommendation?: FinalRecommendation;
   execution_events: ExecutionEvent[];
+  mcp_tool_calls: MCPToolResult[];
+  mcp_tools_summary?: Record<string, any>;
+  hitl_checkpoints: HITLCheckpoint[];
+  is_paused_for_hitl: boolean;
+  active_hitl_checkpoint_id?: string;
+  hitl_enabled: boolean;
   iteration_count: number;
   max_negotiation_rounds: number;
   is_paused_for_human: boolean;

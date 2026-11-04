@@ -64,7 +64,9 @@ async def create_run(req: RunCreateRequest):
     state = await orchestrator.create_and_start_run(
         goal=sanitized_goal,
         constraints=constraints,
-        simulation_mode=req.simulation_mode
+        simulation_mode=req.simulation_mode,
+        hitl_config=req.hitl_config,
+        enable_mcp_tools=req.enable_mcp_tools
     )
     return RunResponse(state=state)
 
@@ -88,7 +90,7 @@ async def list_runs(limit: int = 20, db: AsyncSession = Depends(get_db)):
                 findings_count=len(state_data.get("findings", [])),
                 conflicts_count=len(state_data.get("conflicts", [])),
                 has_final_recommendation=bool(state_data.get("final_recommendation")),
-                is_paused_for_human=(r.status == "paused_for_human"),
+                is_paused_for_human=(r.status in ["paused_for_human", "paused_for_hitl"]),
                 created_at=r.created_at.isoformat()
             )
         )

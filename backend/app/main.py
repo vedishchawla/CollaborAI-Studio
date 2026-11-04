@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db.session import init_db
-from .api import runs_router, scenarios_router, ws_router
+from .api import runs_router, scenarios_router, ws_router, mcp_router, hitl_router
 from .llm import get_llm_provider, rate_limiter
 
 # Configure structured logging
@@ -53,6 +53,8 @@ app.add_middleware(
 app.include_router(runs_router)
 app.include_router(scenarios_router)
 app.include_router(ws_router)
+app.include_router(mcp_router)
+app.include_router(hitl_router)
 
 @app.get("/api/status")
 async def system_status():

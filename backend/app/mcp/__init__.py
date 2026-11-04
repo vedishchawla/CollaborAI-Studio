@@ -1,21 +1,19 @@
 """MCP (Model Context Protocol) Tools Module for CollaborAI.
 
-Provides an MCP-compliant tool server and client integration that enables
-specialist agents to invoke external tools during analysis, and exposes
-CollaborAI capabilities as MCP tools for external consumers.
+Provides general-purpose MCP tools that any specialist agent can invoke
+during analysis, plus a dynamic registry for registering custom tools
+at runtime. Tools are domain-agnostic by design.
 """
 
 from .protocol import MCPTool, MCPToolCall, MCPToolResult, MCPToolRegistry
-from .server import MCPToolServer
 from .client import MCPToolClient
 from .tools import BUILTIN_TOOLS
 
 __all__ = [
     "MCPTool",
     "MCPToolCall",
-    "MCPToolResult", 
+    "MCPToolResult",
     "MCPToolRegistry",
-    "MCPToolServer",
     "MCPToolClient",
     "BUILTIN_TOOLS",
 ]

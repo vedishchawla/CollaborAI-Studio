@@ -28,10 +28,9 @@ class MCPTool(BaseModel):
     """MCP Tool Definition following Model Context Protocol spec."""
     name: str = Field(description="Unique tool identifier e.g. 'web_search'")
     description: str = Field(description="Human-readable description of what this tool does")
-    category: Literal[
-        "research", "calculation", "data_retrieval",
-        "document_analysis", "domain_lookup", "system"
-    ] = Field(default="research", description="Tool category for filtering")
+    category: str = Field(
+        default="general", description="Tool category for filtering (e.g. research, calculation, data_retrieval, analysis, system)"
+    )
     parameters: List[MCPToolParameter] = Field(
         default_factory=list, description="Input parameter schema"
     )
