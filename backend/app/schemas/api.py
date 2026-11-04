@@ -6,6 +6,16 @@ from pydantic import BaseModel, Field
 from .state import Constraint, SharedState
 
 
+class HITLConfig(BaseModel):
+    """Configuration for Human-in-the-Loop checkpoints in a run."""
+    enabled: bool = Field(default=True, description="Enable HITL checkpoints")
+    enable_findings_review: bool = Field(default=False, description="Pause after specialist findings for review")
+    enable_pre_negotiation_approval: bool = Field(default=False, description="Require approval before negotiation")
+    enable_post_negotiation_review: bool = Field(default=False, description="Review negotiation outcomes")
+    enable_pre_synthesis_approval: bool = Field(default=True, description="Gate final synthesis with approval")
+    auto_approve_timeout: Optional[int] = Field(default=None, description="Auto-approve after N seconds")
+
+
 class RunCreateRequest(BaseModel):
     """Payload to launch a new multi-agent decision run."""
     goal: str = Field(description="The complex high-level decision or goal to analyze")
@@ -15,6 +25,8 @@ class RunCreateRequest(BaseModel):
         default=None,
         description="Override default simulation mode (True for offline deterministic mode, False for live Gemini)"
     )
+    hitl_config: Optional[HITLConfig] = Field(default=None, description="HITL checkpoint configuration")
+    enable_mcp_tools: bool = Field(default=True, description="Enable MCP tool augmentation for specialist agents")
 
 
 class RunSummary(BaseModel):

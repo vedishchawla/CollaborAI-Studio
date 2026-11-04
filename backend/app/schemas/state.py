@@ -276,6 +276,28 @@ class SharedState(BaseModel):
     )
     execution_events: List[ExecutionEvent] = Field(default_factory=list, description="Chronological event stream")
     
+    # MCP Tool Tracking
+    mcp_tool_calls: List[Dict[str, Any]] = Field(
+        default_factory=list, description="History of MCP tool invocations by agents"
+    )
+    mcp_tools_summary: Optional[Dict[str, Any]] = Field(
+        default=None, description="Aggregate MCP tool usage statistics"
+    )
+
+    # HITL Checkpoint Tracking
+    hitl_checkpoints: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Human-in-the-Loop checkpoint records"
+    )
+    is_paused_for_hitl: bool = Field(
+        default=False, description="Whether execution is paused at a HITL checkpoint"
+    )
+    active_hitl_checkpoint_id: Optional[str] = Field(
+        default=None, description="ID of the currently active blocking HITL checkpoint"
+    )
+    hitl_enabled: bool = Field(
+        default=True, description="Whether HITL checkpoints are enabled for this run"
+    )
+
     # State Machine Flow Control
     iteration_count: int = 0
     max_negotiation_rounds: int = 2

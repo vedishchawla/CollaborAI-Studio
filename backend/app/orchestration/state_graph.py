@@ -40,6 +40,8 @@ from ..schemas.agent_io import (
 )
 from ..agents.registry import agent_registry
 from ..llm import BaseLLMProvider, get_llm_provider
+from ..mcp.client import MCPToolClient
+from ..hitl.checkpoint import HITLCheckpointManager, HITLCheckpointConfig
 
 logger = logging.getLogger("collaborai.orchestration.graph")
 
@@ -47,8 +49,17 @@ logger = logging.getLogger("collaborai.orchestration.graph")
 class CoordinationStateGraph:
     """Explicit cyclic multi-agent coordination state machine."""
 
-    def __init__(self, llm_provider: Optional[BaseLLMProvider] = None):
+    def __init__(
+        self,
+        llm_provider: Optional[BaseLLMProvider] = None,
+        mcp_client: Optional[MCPToolClient] = None,
+        hitl_manager: Optional[HITLCheckpointManager] = None,
+        enable_mcp_tools: bool = True,
+    ):
         self.llm = llm_provider or get_llm_provider()
+        self.mcp_client = mcp_client or MCPToolClient()
+        self.hitl_manager = hitl_manager or HITLCheckpointManager()
+        self.enable_mcp_tools = enable_mcp_tools
 
     # -------------------------------------------------------------------------
     # Node 1: Goal Decomposition
@@ -162,6 +173,42 @@ INSTRUCTIONS:
             # Stagger specialist execution slightly (1.0s) to keep Free Tier traffic smooth
             if i > 0:
                 await asyncio.sleep(1.0)
+
+            # ── MCP Tool Augmentation ──────────────────────────────────
+            mcp_context = ""
+            if self.enable_mcp_tools:
+                try:
+                    tool_results = await self.mcp_client.invoke_tools_for_agent(
+                        agent_name=specialist.agent_name,
+                        agent_domain=specialist.domain,
+                        goal=state.goal,
+                        run_id=state.run_id,
+                    )
+                    mcp_context = self.mcp_client.format_results_for_prompt(tool_results)
+
+                    # Record tool invocations in state
+                    for tr in tool_results:
+                        state.mcp_tool_calls.append(tr.model_dump(mode="json"))
+
+                    # Emit MCP tool event
+                    tool_event = ExecutionEvent(
+                        event_id=f"EVT-{uuid.uuid4().hex[:8]}",
+                        run_id=state.run_id,
+                        event_type="MCP_TOOL_INVOKED",
+                        agent_name=specialist.agent_name,
+                        title=f"{specialist.role_title} invoked {len(tool_results)} MCP tools",
+                        data={
+                            "tools_used": [tr.tool_name for tr in tool_results],
+                            "all_successful": all(tr.status == "success" for tr in tool_results),
+                            "total_time_ms": sum(tr.execution_time_ms for tr in tool_results),
+                        }
+                    )
+                    state.execution_events.append(tool_event)
+                    if event_callback:
+                        event_callback(tool_event)
+                except Exception as e:
+                    logger.warning("MCP tool invocation failed for %s: %s", specialist.agent_name, e)
+                    mcp_context = "MCP tool augmentation unavailable for this analysis."
 
             # Build prompt with shared blackboard visibility
             blackboard_context = "\n".join(
