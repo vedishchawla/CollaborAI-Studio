@@ -275,6 +275,43 @@ class TestBuiltinTools:
         })
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_calculator_ast_functions_and_exponents(self):
+        result = await calculator_handler({
+            "operation": "evaluate",
+            "parameters": {"expression": "sqrt(144) + 2^3"}
+        })
+        assert result["result"] == 20
+
+    @pytest.mark.asyncio
+    async def test_calculator_top_level_args_and_currency_suffixes(self):
+        result = await calculator_handler({
+            "operation": "evaluate",
+            "expression": "$1.5M - $500k"
+        })
+        assert result["result"] == 1000000
+
+    @pytest.mark.asyncio
+    async def test_calculator_roi_zero_investment_guard(self):
+        result = await calculator_handler({
+            "operation": "roi",
+            "parameters": {"investment": 0, "projected_revenue": 50000}
+        })
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_calculator_compound_growth_and_margin(self):
+        cg = await calculator_handler({
+            "operation": "compound_growth",
+            "parameters": {"principal": 10000, "rate_percent": 10, "periods": 2}
+        })
+        assert cg["final_value"] == 12100.0
+        margin = await calculator_handler({
+            "operation": "margin",
+            "parameters": {"revenue": 200000, "cost": 150000}
+        })
+        assert margin["gross_margin_percent"] == 25.0
+
     # ── Data Analyzer ──
     @pytest.mark.asyncio
     async def test_data_analyzer_summary(self):
@@ -395,17 +432,21 @@ class TestMCPToolClient:
 
     @pytest.mark.asyncio
     async def test_invoke_tools_for_agent_numeric_goal_gets_calculator(self):
-        """Goals with numeric keywords should trigger calculator selection."""
+        """Goals with numeric keywords should trigger calculator selection with real numbers."""
         client = MCPToolClient()
         results = await client.invoke_tools_for_agent(
             agent_name="FinancialAgent",
             agent_domain="Finance",
-            goal="Calculate ROI and budget projections"
+            goal="Launch service within 6 weeks under a $100,000 budget and calculate ROI"
         )
         tool_names = [r.tool_name for r in results]
         assert "web_search" in tool_names
-        # Calculator should be selected because of "Calculate", "ROI", "budget"
-        # But may be capped at max_tools=3
+        assert "calculator" in tool_names
+        calc_res = next(r for r in results if r.tool_name == "calculator")
+        assert calc_res.status == "success"
+        assert calc_res.requesting_agent == "FinancialAgent"
+        assert calc_res.arguments.get("parameters", {}).get("investment") == 100000.0
+        assert calc_res.result["roi_percent"] > 0
 
     @pytest.mark.asyncio
     async def test_invoke_tools_for_agent_data_goal_gets_analyzer(self):

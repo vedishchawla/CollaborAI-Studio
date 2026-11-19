@@ -55,6 +55,8 @@ class MCPToolResult(BaseModel):
     result: Any = Field(default=None, description="Structured result payload")
     error_message: Optional[str] = Field(default=None, description="Error details if status != success")
     execution_time_ms: float = Field(default=0.0, description="Tool execution wall time in ms")
+    arguments: Dict[str, Any] = Field(default_factory=dict, description="Input arguments passed to the tool")
+    requesting_agent: str = Field(default="system", description="Agent that invoked the tool")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

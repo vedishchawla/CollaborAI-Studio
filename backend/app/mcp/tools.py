@@ -8,15 +8,17 @@ Users can register additional custom tools via the MCPToolRegistry API.
 """
 
 from __future__ import annotations
+import ast
 import asyncio
 import hashlib
 import json
 import logging
 import math
+import operator
 import random
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from .protocol import MCPTool, MCPToolParameter, MCPToolRegistry
 
@@ -144,106 +146,326 @@ TEXT_SUMMARIZER_TOOL = MCPTool(
 # Tool 3: Calculator  (general-purpose numeric computation)
 # ---------------------------------------------------------------------------
 
+_BINARY_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+
+_UNARY_OPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+_MATH_FUNCTIONS = {
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "round": round,
+    "min": min,
+    "max": max,
+    "pow": pow,
+    "log": math.log,
+    "log10": math.log10,
+    "ceil": math.ceil,
+    "floor": math.floor,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+}
+
+_MATH_CONSTANTS = {
+    "pi": math.pi,
+    "e": math.e,
+}
+
+_SUFFIX_MULTIPLIERS = {
+    "k": 1_000,
+    "m": 1_000_000,
+    "b": 1_000_000_000,
+}
+
+
+def _normalize_math_expression(expression: str) -> str:
+    """Normalize human-friendly math/financial strings for AST parsing."""
+    expr = expression.strip()
+    if not expr:
+        return "0"
+    # Replace caret exponentiation with Python power operator
+    expr = expr.replace("^", "**")
+    # Strip common currency symbols
+    expr = re.sub(r"[$₹€£]", "", expr)
+    # Remove thousands-separator commas (e.g. 100,000 -> 100000) without touching function arg commas
+    expr = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", expr)
+
+    # Expand shorthand suffixes (e.g. 1.5M -> 1500000, 50k -> 50000)
+    def _expand_suffix(match: re.Match[str]) -> str:
+        num = float(match.group(1))
+        mult = _SUFFIX_MULTIPLIERS[match.group(2).lower()]
+        val = num * mult
+        return str(int(val)) if val.is_integer() else str(val)
+
+    expr = re.sub(r"(?<![a-zA-Z_.])(\d+(?:\.\d+)?)\s*([kKmMbB])\b", _expand_suffix, expr)
+    return expr
+
+
+def _eval_ast_node(node: ast.AST) -> Union[int, float]:
+    """Safely evaluate a whitelisted AST node representing a math expression."""
+    if isinstance(node, ast.Expression):
+        return _eval_ast_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError(f"Unsupported constant value: {node.value!r}")
+    if isinstance(node, ast.Name):
+        key = node.id.lower()
+        if key in _MATH_CONSTANTS:
+            return _MATH_CONSTANTS[key]
+        raise ValueError(f"Unknown identifier in expression: {node.id}")
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        operand = _eval_ast_node(node.operand)
+        return _UNARY_OPS[type(node.op)](operand)
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPS:
+        left = _eval_ast_node(node.left)
+        right = _eval_ast_node(node.right)
+        # Guard against huge exponents causing hangs/memory errors
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+            raise ValueError("Exponent magnitude exceeds safe limit (1000)")
+        return _BINARY_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name):
+            raise ValueError("Unsupported function call syntax")
+        func_name = node.func.id.lower()
+        if func_name not in _MATH_FUNCTIONS:
+            raise ValueError(f"Unsupported math function: {node.func.id}")
+        if node.keywords:
+            raise ValueError("Keyword arguments are not supported in math functions")
+        call_args = [_eval_ast_node(arg) for arg in node.args]
+        return _MATH_FUNCTIONS[func_name](*call_args)
+    raise ValueError(f"Unsupported expression construct: {type(node).__name__}")
+
+
+def _safe_eval_math(expression: str) -> Union[int, float]:
+    """Parse and safely evaluate a mathematical expression using Python's AST."""
+    normalized = _normalize_math_expression(expression)
+    try:
+        tree = ast.parse(normalized, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid mathematical expression '{expression}': {exc.msg}") from exc
+    result = _eval_ast_node(tree)
+    if isinstance(result, float):
+        # Clean floating point representation while preserving precision
+        rounded = round(result, 8)
+        if rounded.is_integer() and abs(rounded) < 1e15:
+            return int(rounded)
+        return rounded
+    return result
+
+
+def _to_float(val: Any, default: float = 0.0) -> float:
+    """Coerce numbers or formatted numeric strings ($1.5M, 20%, 100,000) into float."""
+    if val is None or isinstance(val, bool):
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        cleaned = val.strip().rstrip("%")
+        if not cleaned:
+            return default
+        normalized = _normalize_math_expression(cleaned)
+        return float(normalized)
+    raise ValueError(f"Cannot convert value {val!r} to number")
+
+
 async def calculator_handler(args: Dict[str, Any]) -> Any:
     """Perform general numeric calculations.
 
-    Supports basic arithmetic, percentage, ratio, and common financial
-    formulas (ROI, NPV, breakeven). The expression is evaluated safely.
+    Supports AST-safe arithmetic expressions (with math functions and ^ exponents),
+    percentage, ratio, ROI, NPV, breakeven, statistics, compound_growth, and margin.
+    Accepts arguments nested under ``parameters`` or passed at top-level ``args``.
     """
-    operation = args.get("operation", "evaluate")
-    params = args.get("parameters", {})
+    operation = str(args.get("operation", "evaluate")).strip().lower()
+    raw_params = args.get("parameters")
+    params: Dict[str, Any] = {k: v for k, v in args.items() if k not in ("operation", "parameters")}
+    if isinstance(raw_params, dict):
+        params.update(raw_params)
+
     await asyncio.sleep(0.05)
 
-    if operation == "evaluate":
-        # Safe arithmetic expression evaluation
-        expression = str(params.get("expression", "0"))
-        # Allow only digits, operators, parens, dots, spaces
-        sanitized = re.sub(r'[^0-9+\-*/().%^ ]', '', expression)
-        try:
-            result_val = eval(sanitized, {"__builtins__": {}}, {"math": math})  # noqa: S307
-            return {"operation": "evaluate", "expression": expression, "result": result_val}
-        except Exception as e:
-            return {"operation": "evaluate", "expression": expression, "error": str(e)}
+    try:
+        if operation == "evaluate":
+            expression = str(params.get("expression", "0"))
+            try:
+                result_val = _safe_eval_math(expression)
+                return {"operation": "evaluate", "expression": expression, "result": result_val}
+            except ZeroDivisionError:
+                return {"operation": "evaluate", "expression": expression, "error": "Division by zero"}
+            except Exception as e:
+                return {"operation": "evaluate", "expression": expression, "error": str(e)}
 
-    elif operation == "percentage":
-        value = float(params.get("value", 0))
-        total = float(params.get("total", 100))
-        pct = (value / total) * 100 if total != 0 else 0
-        return {"operation": "percentage", "value": value, "total": total, "percentage": round(pct, 2)}
+        elif operation == "percentage":
+            value = _to_float(params.get("value", 0))
+            total = _to_float(params.get("total", 100))
+            if total == 0:
+                return {"operation": "percentage", "value": value, "total": total, "percentage": 0.0}
+            pct = (value / total) * 100
+            return {"operation": "percentage", "value": value, "total": total, "percentage": round(pct, 2)}
 
-    elif operation == "ratio":
-        a = float(params.get("a", 0))
-        b = float(params.get("b", 1))
-        return {"operation": "ratio", "a": a, "b": b, "ratio": round(a / b, 4) if b != 0 else "infinity"}
+        elif operation == "ratio":
+            a = _to_float(params.get("a", 0))
+            b = _to_float(params.get("b", 1))
+            return {"operation": "ratio", "a": a, "b": b, "ratio": round(a / b, 4) if b != 0 else "infinity"}
 
-    elif operation == "roi":
-        investment = float(params.get("investment", 100000))
-        revenue = float(params.get("projected_revenue", 150000))
-        roi = ((revenue - investment) / investment) * 100
-        return {
-            "operation": "ROI",
-            "investment": investment,
-            "projected_revenue": revenue,
-            "roi_percent": round(roi, 2),
-            "verdict": "Positive" if roi > 0 else "Negative",
-        }
+        elif operation == "roi":
+            investment = _to_float(params.get("investment", 100000))
+            revenue = _to_float(params.get("projected_revenue", 150000))
+            if investment == 0:
+                return {
+                    "operation": "ROI",
+                    "investment": investment,
+                    "projected_revenue": revenue,
+                    "error": "Investment cannot be zero for ROI calculation",
+                }
+            net_profit = revenue - investment
+            roi = (net_profit / investment) * 100
+            payback_multiple = revenue / investment
+            return {
+                "operation": "ROI",
+                "investment": investment,
+                "projected_revenue": revenue,
+                "net_profit": round(net_profit, 2),
+                "roi_percent": round(roi, 2),
+                "payback_multiple": round(payback_multiple, 2),
+                "verdict": "Positive" if roi > 0 else "Negative",
+            }
 
-    elif operation == "npv":
-        cash_flows = params.get("cash_flows", [-100000, 30000, 40000, 50000, 60000])
-        discount_rate = float(params.get("discount_rate", 0.1))
-        npv = sum(cf / (1 + discount_rate) ** i for i, cf in enumerate(cash_flows))
-        return {
-            "operation": "NPV",
-            "cash_flows": cash_flows,
-            "discount_rate": discount_rate,
-            "npv": round(npv, 2),
-            "verdict": "Viable" if npv > 0 else "Not viable",
-        }
+        elif operation == "npv":
+            raw_flows = params.get("cash_flows", [-100000, 30000, 40000, 50000, 60000])
+            cash_flows = [_to_float(cf) for cf in raw_flows] if isinstance(raw_flows, list) else []
+            if not cash_flows:
+                return {"operation": "NPV", "error": "cash_flows must be a non-empty list of numbers"}
+            discount_rate = _to_float(params.get("discount_rate", 0.1))
+            if discount_rate <= -1:
+                return {"operation": "NPV", "error": "discount_rate must be greater than -1"}
+            npv = sum(cf / ((1 + discount_rate) ** i) for i, cf in enumerate(cash_flows))
+            return {
+                "operation": "NPV",
+                "cash_flows": cash_flows,
+                "discount_rate": discount_rate,
+                "npv": round(npv, 2),
+                "verdict": "Viable" if npv > 0 else "Not viable",
+            }
 
-    elif operation == "breakeven":
-        fixed_costs = float(params.get("fixed_costs", 50000))
-        unit_price = float(params.get("unit_price", 100))
-        variable_cost = float(params.get("variable_cost_per_unit", 40))
-        if unit_price <= variable_cost:
-            return {"operation": "breakeven", "error": "Unit price must exceed variable cost"}
-        breakeven_units = fixed_costs / (unit_price - variable_cost)
-        return {
-            "operation": "breakeven",
-            "fixed_costs": fixed_costs,
-            "breakeven_units": round(breakeven_units),
-            "breakeven_revenue": round(breakeven_units * unit_price, 2),
-        }
+        elif operation == "breakeven":
+            fixed_costs = _to_float(params.get("fixed_costs", 50000))
+            unit_price = _to_float(params.get("unit_price", 100))
+            variable_cost = _to_float(params.get("variable_cost_per_unit", 40))
+            if unit_price <= variable_cost:
+                return {"operation": "breakeven", "error": "Unit price must exceed variable cost"}
+            contribution_margin = unit_price - variable_cost
+            breakeven_units = fixed_costs / contribution_margin
+            return {
+                "operation": "breakeven",
+                "fixed_costs": fixed_costs,
+                "unit_price": unit_price,
+                "variable_cost_per_unit": variable_cost,
+                "contribution_margin": round(contribution_margin, 2),
+                "breakeven_units": round(breakeven_units),
+                "breakeven_revenue": round(breakeven_units * unit_price, 2),
+            }
 
-    elif operation == "statistics":
-        values = params.get("values", [])
-        if not values:
-            return {"operation": "statistics", "error": "No values provided"}
-        n = len(values)
-        mean = sum(values) / n
-        sorted_v = sorted(values)
-        median = sorted_v[n // 2] if n % 2 else (sorted_v[n // 2 - 1] + sorted_v[n // 2]) / 2
-        variance = sum((x - mean) ** 2 for x in values) / n
-        return {
-            "operation": "statistics",
-            "count": n,
-            "mean": round(mean, 4),
-            "median": round(median, 4),
-            "min": min(values),
-            "max": max(values),
-            "std_dev": round(math.sqrt(variance), 4),
-        }
+        elif operation == "statistics":
+            raw_values = params.get("values", [])
+            if not raw_values or not isinstance(raw_values, list):
+                return {"operation": "statistics", "error": "No values provided"}
+            values = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else _to_float(v) for v in raw_values]
+            n = len(values)
+            mean = sum(values) / n
+            sorted_v = sorted(values)
+            median = sorted_v[n // 2] if n % 2 else (sorted_v[n // 2 - 1] + sorted_v[n // 2]) / 2
+            variance = sum((x - mean) ** 2 for x in values) / n
+            return {
+                "operation": "statistics",
+                "count": n,
+                "mean": round(mean, 4),
+                "median": round(median, 4),
+                "min": min(values),
+                "max": max(values),
+                "std_dev": round(math.sqrt(variance), 4),
+            }
 
-    else:
-        return {"error": f"Unknown operation: {operation}. Supported: evaluate, percentage, ratio, roi, npv, breakeven, statistics"}
+        elif operation == "compound_growth":
+            principal = _to_float(params.get("principal", params.get("initial_value", 100000)))
+            rate_percent = _to_float(params.get("rate_percent", params.get("annual_rate", 10)))
+            periods = int(_to_float(params.get("periods", 3)))
+            if periods < 0:
+                return {"operation": "compound_growth", "error": "periods must be non-negative"}
+            final_value = principal * ((1 + rate_percent / 100) ** periods)
+            total_growth = final_value - principal
+            return {
+                "operation": "compound_growth",
+                "principal": principal,
+                "rate_percent": rate_percent,
+                "periods": periods,
+                "final_value": round(final_value, 2),
+                "total_growth": round(total_growth, 2),
+                "growth_percent": round(((final_value - principal) / principal) * 100, 2) if principal != 0 else 0.0,
+            }
+
+        elif operation == "margin":
+            revenue = _to_float(params.get("revenue", 100000))
+            cost = _to_float(params.get("cost", 75000))
+            if revenue == 0:
+                return {"operation": "margin", "error": "Revenue cannot be zero for margin calculation"}
+            gross_profit = revenue - cost
+            gross_margin_pct = (gross_profit / revenue) * 100
+            markup_pct = (gross_profit / cost) * 100 if cost != 0 else None
+            return {
+                "operation": "margin",
+                "revenue": revenue,
+                "cost": cost,
+                "gross_profit": round(gross_profit, 2),
+                "gross_margin_percent": round(gross_margin_pct, 2),
+                "markup_percent": round(markup_pct, 2) if markup_pct is not None else None,
+            }
+
+        else:
+            return {
+                "error": (
+                    f"Unknown operation: {operation}. Supported: evaluate, percentage, ratio, "
+                    "roi, npv, breakeven, statistics, compound_growth, margin"
+                )
+            }
+    except Exception as e:
+        return {"operation": operation, "error": str(e)}
 
 
 CALCULATOR_TOOL = MCPTool(
     name="calculator",
-    description="Perform general numeric calculations including arithmetic expressions, percentages, ratios, ROI, NPV, breakeven analysis, and basic statistics. A universal computation tool for any agent domain.",
+    description=(
+        "Perform general numeric calculations including AST-safe arithmetic expressions "
+        "(with sqrt, round, min, max, pow, log, ^), percentages, ratios, ROI, NPV, "
+        "breakeven analysis, statistics, compound growth, and margin analysis."
+    ),
     category="calculation",
     parameters=[
-        MCPToolParameter(name="operation", type="string", description="Operation type: evaluate, percentage, ratio, roi, npv, breakeven, statistics", required=True),
-        MCPToolParameter(name="parameters", type="object", description="Operation-specific parameters (e.g. {expression}, {value, total}, {investment, projected_revenue}, {cash_flows, discount_rate}, {values})", required=True),
+        MCPToolParameter(
+            name="operation",
+            type="string",
+            description="Operation type: evaluate, percentage, ratio, roi, npv, breakeven, statistics, compound_growth, margin",
+            required=True,
+            default="evaluate",
+        ),
+        MCPToolParameter(
+            name="parameters",
+            type="object",
+            description="Operation-specific parameters (e.g. {expression}, {value, total}, {investment, projected_revenue}, {cash_flows, discount_rate}, {values})",
+            required=True,
+            default={"expression": "(150000 - 100000) / 100000 * 100"},
+        ),
     ],
 )
 

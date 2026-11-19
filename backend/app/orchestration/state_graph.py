@@ -178,10 +178,19 @@ INSTRUCTIONS:
             mcp_context = ""
             if self.enable_mcp_tools:
                 try:
+                    constraints_text = " ".join(
+                        f"{c.description} ({c.threshold_value})" if c.threshold_value else c.description
+                        for c in state.constraints
+                    )
+                    goal_with_constraints = (
+                        f"{state.goal} {constraints_text}".strip()
+                        if constraints_text
+                        else state.goal
+                    )
                     tool_results = await self.mcp_client.invoke_tools_for_agent(
                         agent_name=specialist.agent_name,
                         agent_domain=specialist.domain,
-                        goal=state.goal,
+                        goal=goal_with_constraints,
                         run_id=state.run_id,
                     )
                     mcp_context = self.mcp_client.format_results_for_prompt(tool_results)

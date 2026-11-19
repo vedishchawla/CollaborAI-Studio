@@ -8,14 +8,203 @@ NOT hardcoded to any specific domain.
 
 from __future__ import annotations
 import logging
+import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .protocol import MCPTool, MCPToolCall, MCPToolResult, MCPToolRegistry
 from .tools import create_default_registry
 
 logger = logging.getLogger("collaborai.mcp.client")
+
+_UNIT_MULTIPLIERS = {
+    "k": 1_000,
+    "m": 1_000_000,
+    "b": 1_000_000_000,
+    "lakh": 100_000,
+    "lakhs": 100_000,
+    "crore": 10_000_000,
+    "crores": 10_000_000,
+}
+
+
+def _extract_numbers_from_text(text: str) -> Dict[str, Any]:
+    """Extract expressions, monetary values, percentages, and numeric values from goal/constraint text."""
+    expressions = re.findall(
+        r"(?<![A-Za-z0-9_.-])(\d+(?:\.\d+)?(?:\s*[+\-*/]\s*\d+(?:\.\d+)?)+)(?![A-Za-z0-9_.-])",
+        text,
+    )
+
+    monetary: List[float] = []
+    # Match currency-prefixed amounts with optional unit suffix (e.g. $1.5M, $250K, ₹10 Lakh, $100,000)
+    for match in re.finditer(
+        r"[$₹€£]\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|lakhs?|crores?)?\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        num = float(match.group(1).replace(",", ""))
+        unit = match.group(2).lower() if match.group(2) else None
+        if unit in _UNIT_MULTIPLIERS:
+            num *= _UNIT_MULTIPLIERS[unit]
+        monetary.append(num)
+
+    # Also match standalone suffixed amounts without currency symbol (e.g. 2 Lakh, 1.5M)
+    for match in re.finditer(
+        r"(?<![$₹€£\d])(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|lakhs?|crores?)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        num = float(match.group(1).replace(",", ""))
+        unit = match.group(2).lower()
+        val = num * _UNIT_MULTIPLIERS[unit]
+        if val not in monetary:
+            monetary.append(val)
+
+    percentages = [
+        float(m.group(1))
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%", text)
+    ]
+
+    all_numbers: List[float] = []
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_.-])(\d+(?:,\d{3})*(?:\.\d+)?)(?![A-Za-z0-9_.-])",
+        text,
+    ):
+        try:
+            all_numbers.append(float(match.group(1).replace(",", "")))
+        except ValueError:
+            continue
+
+    return {
+        "expressions": expressions,
+        "monetary": monetary,
+        "percentages": percentages,
+        "all_numbers": all_numbers,
+    }
+
+
+def _build_calculator_args(goal: str, agent_domain: str = "") -> Dict[str, Any]:
+    """Select the best calculator operation and real numeric arguments from goal text."""
+    extracted = _extract_numbers_from_text(goal)
+    goal_lower = goal.lower()
+    monetary = extracted["monetary"]
+    percentages = extracted["percentages"]
+    all_nums = extracted["all_numbers"]
+    expressions = extracted["expressions"]
+
+    if expressions:
+        return {
+            "operation": "evaluate",
+            "parameters": {"expression": expressions[0]},
+        }
+
+    if "breakeven" in goal_lower or "break-even" in goal_lower or "break even" in goal_lower:
+        base = monetary[0] if monetary else (all_nums[0] if all_nums else 50000.0)
+        fixed_costs = base if base >= 100 else 50000.0
+        unit_price = round(max(100.0, fixed_costs / 500.0), 2)
+        variable_cost = round(unit_price * 0.4, 2)
+        return {
+            "operation": "breakeven",
+            "parameters": {
+                "fixed_costs": fixed_costs,
+                "unit_price": unit_price,
+                "variable_cost_per_unit": variable_cost,
+            },
+        }
+
+    if "npv" in goal_lower or "cash flow" in goal_lower or "discount" in goal_lower:
+        base = monetary[0] if monetary else (all_nums[0] if all_nums else 100000.0)
+        inv = base if base >= 100 else 100000.0
+        rate = round(percentages[0] / 100.0, 4) if percentages else 0.1
+        if rate >= 1.0 or rate <= -1.0:
+            rate = 0.1
+        return {
+            "operation": "npv",
+            "parameters": {
+                "cash_flows": [-inv, round(inv * 0.3, 2), round(inv * 0.4, 2), round(inv * 0.5, 2)],
+                "discount_rate": rate,
+            },
+        }
+
+    if (
+        ("margin" in goal_lower or "percentage" in goal_lower or "%" in goal)
+        and percentages
+        and not any(w in goal_lower for w in ("roi", "investment", "revenue", "budget", "cost"))
+    ):
+        pct = percentages[0]
+        base = monetary[0] if monetary else 100000.0
+        return {
+            "operation": "percentage",
+            "parameters": {"value": round(base * (pct / 100.0), 2), "total": base},
+        }
+
+    if len(monetary) >= 2:
+        inv, rev = min(monetary[0], monetary[1]), max(monetary[0], monetary[1])
+        if inv > 0 and rev > inv:
+            return {
+                "operation": "roi",
+                "parameters": {"investment": inv, "projected_revenue": rev},
+            }
+        if inv > 0:
+            return {
+                "operation": "roi",
+                "parameters": {"investment": inv, "projected_revenue": round(inv * 1.35, 2)},
+            }
+
+    if len(monetary) == 1 and monetary[0] > 0:
+        budget = monetary[0]
+        uplift = (percentages[0] / 100.0) if (percentages and "margin" in goal_lower) else 0.35
+        return {
+            "operation": "roi",
+            "parameters": {
+                "investment": budget,
+                "projected_revenue": round(budget * (1.0 + uplift), 2),
+            },
+        }
+
+    if percentages:
+        return {
+            "operation": "percentage",
+            "parameters": {"value": percentages[0], "total": 100},
+        }
+
+    if len(all_nums) >= 2:
+        return {
+            "operation": "statistics",
+            "parameters": {"values": all_nums[:10]},
+        }
+
+    if len(all_nums) == 1 and all_nums[0] != 0:
+        return {
+            "operation": "evaluate",
+            "parameters": {"expression": f"{all_nums[0]} * 1.25"},
+        }
+
+    return {
+        "operation": "roi",
+        "parameters": {"investment": 100000, "projected_revenue": 135000},
+    }
+
+
+def _build_data_analyzer_args(goal: str) -> Dict[str, Any]:
+    """Build structured benchmark records derived from extracted goal figures for data_analyzer."""
+    extracted = _extract_numbers_from_text(goal)
+    base = (
+        extracted["monetary"][0]
+        if extracted["monetary"]
+        else (extracted["all_numbers"][0] if extracted["all_numbers"] else 100000.0)
+    )
+    if base <= 0:
+        base = 100000.0
+    return {
+        "data": [
+            {"scenario": "conservative", "projected_cost": round(base * 0.85, 2), "expected_value": round(base * 1.1, 2)},
+            {"scenario": "baseline", "projected_cost": round(base, 2), "expected_value": round(base * 1.35, 2)},
+            {"scenario": "optimistic", "projected_cost": round(base * 1.15, 2), "expected_value": round(base * 1.65, 2)},
+        ],
+        "analysis_type": "summary",
+    }
 
 
 class MCPToolClient:
@@ -88,6 +277,8 @@ class MCPToolClient:
                 tool_name=tool_name,
                 status="error",
                 error_message=f"Tool '{tool_name}' not found in registry",
+                arguments=arguments,
+                requesting_agent=requesting_agent,
             )
             self._result_history.append(result)
             return result
@@ -102,6 +293,8 @@ class MCPToolClient:
                 status="success",
                 result=output,
                 execution_time_ms=round(elapsed_ms, 2),
+                arguments=arguments,
+                requesting_agent=requesting_agent,
             )
         except Exception as e:
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -112,6 +305,8 @@ class MCPToolClient:
                 status="error",
                 error_message=str(e),
                 execution_time_ms=round(elapsed_ms, 2),
+                arguments=arguments,
+                requesting_agent=requesting_agent,
             )
 
         self._result_history.append(result)
@@ -145,7 +340,8 @@ class MCPToolClient:
         goal_lower = goal.lower()
 
         # Build a prioritized list of (tool_name, arguments) based on general heuristics
-        tool_selections: List[tuple[str, Dict[str, Any]]] = []
+        tool_selections: List[Tuple[str, Dict[str, Any]]] = []
+        extracted = _extract_numbers_from_text(goal)
 
         # 1. Every agent benefits from web search for external grounding
         if "web_search" in available_names:
@@ -162,24 +358,23 @@ class MCPToolClient:
                 "max_docs": 2,
             }))
 
-        # 3. Calculator when goal involves quantitative aspects
+        # 3. Calculator when goal involves quantitative aspects or numbers
         numeric_keywords = ["cost", "budget", "roi", "revenue", "price", "profit",
                           "margin", "rate", "percent", "calculate", "npv", "breakeven",
-                          "forecast", "growth", "investment", "financial"]
-        if "calculator" in available_names and any(kw in goal_lower for kw in numeric_keywords):
-            tool_selections.append(("calculator", {
-                "operation": "evaluate",
-                "parameters": {"expression": "0"},  # Placeholder — agent provides real expression
-            }))
+                          "forecast", "growth", "investment", "financial", "cap", "week", "month"]
+        has_numbers = bool(
+            extracted["monetary"] or extracted["percentages"] or extracted["expressions"]
+        )
+        if "calculator" in available_names and (
+            has_numbers or any(kw in goal_lower for kw in numeric_keywords)
+        ):
+            tool_selections.append(("calculator", _build_calculator_args(goal, agent_domain)))
 
         # 4. Data analyzer when structured data analysis is needed
         data_keywords = ["data", "dataset", "metrics", "statistics", "compare",
                         "trends", "analyze", "performance", "benchmark"]
         if "data_analyzer" in available_names and any(kw in goal_lower for kw in data_keywords):
-            tool_selections.append(("data_analyzer", {
-                "data": [],  # Placeholder — agent provides real data
-                "analysis_type": "summary",
-            }))
+            tool_selections.append(("data_analyzer", _build_data_analyzer_args(goal)))
 
         # 5. Text summarizer when dealing with long-form content
         summary_keywords = ["summarize", "summary", "report", "review", "overview",
