@@ -153,13 +153,48 @@ export function useRunWebSocket(runId: string | null) {
             }
             case 'MCP_TOOL_INVOKED': {
               const toolData = event.data as any;
-              if (toolData && !next.mcp_tool_calls?.some((t: any) => t.call_id === toolData.call_id)) {
+              if (Array.isArray(toolData?.calls)) {
+                const existing = next.mcp_tool_calls || [];
+                const merged = [...existing];
+                for (const call of toolData.calls) {
+                  if (call?.call_id && !merged.some((t: any) => t.call_id === call.call_id)) {
+                    merged.push(call);
+                  }
+                }
+                next.mcp_tool_calls = merged;
+              } else if (toolData?.call_id && !next.mcp_tool_calls?.some((t: any) => t.call_id === toolData.call_id)) {
                 next.mcp_tool_calls = [...(next.mcp_tool_calls || []), toolData];
               }
               break;
             }
             case 'MCP_TOOLS_SUMMARY': {
               next.mcp_tools_summary = event.data;
+              break;
+            }
+            case 'ORCHESTRATOR_VERIFIED': {
+              next.orchestrator_verification = event.data as any;
+              // Sync verified agents list if new agents were auto-injected
+              const verifiedAgents: string[] = event.data?.['verified_agents'] || [];
+              if (verifiedAgents.length > 0 && next.active_specialists.length !== verifiedAgents.length) {
+                refreshState();
+              }
+              break;
+            }
+            case 'FINDINGS_VERIFIED': {
+              const verifs = (event.data?.['verifications'] as any[]) || [];
+              next.finding_verifications = verifs;
+              // Mirror verification metadata onto finding cards and apply auto-corrections immediately
+              const byFid = new Map(verifs.map((v) => [v.finding_id, v]));
+              next.findings = next.findings.map((f) => {
+                const v = byFid.get(f.finding_id);
+                if (!v) return f;
+                return {
+                  ...f,
+                  claim: v.verdict === 'auto_corrected' && v.corrected_claim ? v.corrected_claim : f.claim,
+                  status: v.verdict === 'auto_corrected' ? 'revised' : f.status,
+                  evidence: { ...f.evidence, verification: v },
+                };
+              });
               break;
             }
             case 'HITL_PAUSED':

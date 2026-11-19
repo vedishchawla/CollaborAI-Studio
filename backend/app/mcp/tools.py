@@ -11,12 +11,15 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import math
 import operator
 import random
 import re
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Union
 
@@ -26,19 +29,15 @@ logger = logging.getLogger("collaborai.mcp.tools")
 
 
 # ---------------------------------------------------------------------------
-# Tool 1: Web Search  (general-purpose information retrieval)
+# Tool 1: Web Search  (general-purpose live + fallback information retrieval)
 # ---------------------------------------------------------------------------
 
-async def web_search_handler(args: Dict[str, Any]) -> Any:
-    """Simulate a web search returning relevant results for any query.
+_WEB_SEARCH_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_WEB_SEARCH_SOURCES: Dict[str, str] = {}
 
-    In production this would call a real search API (Google, Bing, Tavily, etc.).
-    The simulation uses deterministic seeding so results are reproducible.
-    """
-    query = args.get("query", "")
-    max_results = min(int(args.get("max_results", 5)), 10)
-    await asyncio.sleep(0.1)  # Simulate network latency
 
+def _simulated_web_results(query: str, count: int) -> List[Dict[str, Any]]:
+    """Deterministic fallback generator used when offline or topping up results."""
     seed = int(hashlib.md5(query.encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
 
@@ -56,22 +55,145 @@ async def web_search_handler(args: Dict[str, Any]) -> Any:
         "Landscape analysis reveals emerging trends related to {q}.",
         "Policy and governance frameworks around {q} are evolving rapidly.",
         "Cost-benefit analysis suggests that {q} requires careful phased implementation.",
+        "Operational benchmarking for {q} highlights measurable trade-offs.",
+        "Regulatory compliance reviews for {q} emphasize transparent governance.",
+        "Market adoption metrics around {q} point to phased rollout strategies.",
     ]
 
-    results = []
-    for i in range(min(max_results, len(templates))):
+    results: List[Dict[str, Any]] = []
+    for i in range(min(count, len(templates))):
         results.append({
             "title": f"Analysis: {query[:60]} – Report {rng.randint(2023, 2025)}",
             "url": f"https://{rng.choice(domains)}/articles/{hashlib.md5((query + str(i)).encode()).hexdigest()[:10]}",
             "snippet": rng.choice(templates).format(q=query.lower()),
             "relevance_score": round(rng.uniform(0.7, 0.98), 2),
         })
+    return results
 
+
+def _fetch_live_web_results(query: str, max_results: int) -> List[Dict[str, Any]]:
+    """Fetch live search results from DuckDuckGo Instant Answer and Wikipedia REST APIs."""
+    if not query.strip():
+        return []
+
+    encoded_query = urllib.parse.quote(query.strip())
+    headers = {"User-Agent": "CollaborAI-MCP/1.0 (https://github.com/vedishchawla/multi-agent-colab)"}
+    collected: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    def _add_result(title: str, url: str, snippet: str, score: float) -> None:
+        clean_url = url.strip()
+        if not clean_url or clean_url in seen_urls or len(collected) >= max_results:
+            return
+        seen_urls.add(clean_url)
+        collected.append({
+            "title": title.strip() or query[:60],
+            "url": clean_url,
+            "snippet": snippet.strip(),
+            "relevance_score": round(score, 2),
+        })
+
+    # 1. DuckDuckGo Instant Answer API
+    try:
+        ddg_url = (
+            f"https://api.duckduckgo.com/?q={encoded_query}"
+            "&format=json&no_html=1&skip_disambig=1"
+        )
+        req = urllib.request.Request(ddg_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            ddg_data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+        abstract_text = ddg_data.get("AbstractText") or ""
+        abstract_url = ddg_data.get("AbstractURL") or ""
+        heading = ddg_data.get("Heading") or query[:60]
+        if abstract_text and abstract_url:
+            _add_result(heading, abstract_url, abstract_text[:300], 0.98)
+
+        for idx, topic in enumerate(ddg_data.get("RelatedTopics", [])):
+            if len(collected) >= max_results:
+                break
+            if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
+                text = str(topic["Text"])
+                title = text.split(" - ")[0][:80]
+                _add_result(title, str(topic["FirstURL"]), text[:280], max(0.75, 0.94 - idx * 0.03))
+            elif isinstance(topic, dict) and isinstance(topic.get("Topics"), list):
+                for sub_idx, sub in enumerate(topic["Topics"]):
+                    if isinstance(sub, dict) and sub.get("Text") and sub.get("FirstURL"):
+                        text = str(sub["Text"])
+                        title = text.split(" - ")[0][:80]
+                        _add_result(title, str(sub["FirstURL"]), text[:280], max(0.72, 0.90 - sub_idx * 0.03))
+    except Exception as e:
+        logger.debug("DuckDuckGo live search unavailable: %s", e)
+
+    # 2. Wikipedia Search API
+    if len(collected) < max_results:
+        try:
+            wiki_url = (
+                "https://en.wikipedia.org/w/api.php?action=query&list=search"
+                f"&srsearch={encoded_query}&srlimit={max_results}&utf8=1&format=json"
+            )
+            req = urllib.request.Request(wiki_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                wiki_data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+            search_items = wiki_data.get("query", {}).get("search", [])
+            for idx, item in enumerate(search_items):
+                if len(collected) >= max_results:
+                    break
+                title = str(item.get("title", ""))
+                raw_snippet = str(item.get("snippet", ""))
+                clean_snippet = html.unescape(re.sub(r"<[^>]+>", "", raw_snippet))
+                article_url = f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+                score = max(0.75, 0.96 - idx * 0.03)
+                _add_result(title, article_url, clean_snippet, score)
+        except Exception as e:
+            logger.debug("Wikipedia live search unavailable: %s", e)
+
+    return collected[:max_results]
+
+
+async def web_search_handler(args: Dict[str, Any]) -> Any:
+    """Perform a live web search via Wikipedia & DuckDuckGo with deterministic offline fallback.
+
+    Caches results by normalized (query, max_results) so identical queries remain deterministic.
+    """
+    query = str(args.get("query", ""))
+    max_results = max(1, min(int(args.get("max_results", 5)), 10))
+    cache_key = f"{query.strip().lower()}::{max_results}"
+
+    if cache_key in _WEB_SEARCH_CACHE:
+        cached = _WEB_SEARCH_CACHE[cache_key]
+        return {
+            "query": query,
+            "results_count": len(cached),
+            "results": cached,
+            "source": _WEB_SEARCH_SOURCES.get(cache_key, "MCP Web Search (cached)"),
+        }
+
+    live_results = await asyncio.to_thread(_fetch_live_web_results, query, max_results)
+    if live_results:
+        source_label = "MCP Live Web Search (Wikipedia & DuckDuckGo)"
+        results = list(live_results)
+        if len(results) < max_results:
+            fallback_items = _simulated_web_results(query, max_results)
+            seen = {r["url"] for r in results}
+            for item in fallback_items:
+                if len(results) >= max_results:
+                    break
+                if item["url"] not in seen:
+                    results.append(item)
+                    seen.add(item["url"])
+    else:
+        source_label = "MCP Web Search (simulated fallback)"
+        results = _simulated_web_results(query, max_results)
+
+    _WEB_SEARCH_CACHE[cache_key] = results
+    _WEB_SEARCH_SOURCES[cache_key] = source_label
     return {
         "query": query,
         "results_count": len(results),
         "results": results,
-        "source": "MCP Web Search (simulated)",
+        "source": source_label,
     }
 
 

@@ -243,6 +243,37 @@ class SpecialistProfile(BaseModel):
     is_dynamic: bool = False
 
 
+class OrchestratorVerification(BaseModel):
+    """Audit result verifying the top-level orchestrator decomposition & team selection."""
+    verification_id: str
+    is_valid: bool = True
+    hallucination_detected: bool = False
+    grounding_score: float = Field(ge=0.0, le=1.0, default=0.95)
+    initial_agent_count: int = 0
+    verified_agent_count: int = 0
+    verified_agents: List[str] = Field(default_factory=list)
+    added_missing_agents: List[str] = Field(default_factory=list)
+    flagged_issues: List[str] = Field(default_factory=list)
+    rationale: str = ""
+    checked_at: datetime = Field(default_factory=utc_now)
+
+
+class FindingVerification(BaseModel):
+    """Verification & anti-hallucination audit for an individual specialist finding."""
+    verification_id: str
+    finding_id: str
+    agent_name: str
+    verdict: Literal["verified", "auto_corrected", "flagged"] = "verified"
+    hallucination_detected: bool = False
+    grounding_score: float = Field(ge=0.0, le=1.0, default=0.92)
+    mcp_evidence_aligned: bool = True
+    goal_aligned: bool = True
+    issues_found: List[str] = Field(default_factory=list)
+    corrected_claim: Optional[str] = None
+    rationale: str = ""
+    checked_at: datetime = Field(default_factory=utc_now)
+
+
 class SharedState(BaseModel):
     """The complete shared blackboard state for a multi-agent decision run.
     
@@ -282,6 +313,14 @@ class SharedState(BaseModel):
     )
     mcp_tools_summary: Optional[Dict[str, Any]] = Field(
         default=None, description="Aggregate MCP tool usage statistics"
+    )
+
+    # Hallucination & Output Verification Guard Audits
+    orchestrator_verification: Optional[OrchestratorVerification] = Field(
+        default=None, description="Verification audit of top-level orchestrator decomposition"
+    )
+    finding_verifications: List[FindingVerification] = Field(
+        default_factory=list, description="Per-agent output verification and anti-hallucination audits"
     )
 
     # HITL Checkpoint Tracking

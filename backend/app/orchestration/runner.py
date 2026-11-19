@@ -166,8 +166,14 @@ class RunOrchestrator:
             # 1. Goal Decomposition
             state = await graph.decompose_goal_node(state, event_callback=self._broadcast)
 
+            # 1.5 Top-Level Orchestrator Guard Audit (Verify agent count & domain coverage)
+            state = await graph.verify_orchestrator_node(state, event_callback=self._broadcast)
+
             # 2. Specialist Execution
             state = await graph.execute_specialists_node(state, event_callback=self._broadcast)
+
+            # 2.5 Specialist Findings Guard Audit (Verify agent outputs & MCP grounding)
+            state = await graph.verify_findings_node(state, event_callback=self._broadcast)
 
             # HITL Checkpoint: findings_review
             if state.hitl_enabled and hitl_mgr.should_checkpoint("findings_review"):

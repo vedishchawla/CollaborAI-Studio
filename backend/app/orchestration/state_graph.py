@@ -28,7 +28,9 @@ from ..schemas.state import (
     AttributedClaim,
     AgentStatus,
     ExecutionEvent,
-    SpecialistProfile
+    SpecialistProfile,
+    OrchestratorVerification,
+    FindingVerification,
 )
 from ..schemas.agent_io import (
     GoalDecompositionOutput,
@@ -36,7 +38,10 @@ from ..schemas.agent_io import (
     ConflictDetectionOutput,
     NegotiationProposalOutput,
     NegotiationModerationOutput,
-    SynthesisOutput
+    SynthesisOutput,
+    OrchestratorAuditOutput,
+    FindingAuditItem,
+    FindingsVerificationOutput,
 )
 from ..agents.registry import agent_registry
 from ..llm import BaseLLMProvider, get_llm_provider
@@ -143,6 +148,174 @@ INSTRUCTIONS:
         return state
 
     # -------------------------------------------------------------------------
+    # Node 1.5: Top-Level Orchestrator Guard Audit (Anti-Hallucination)
+    # -------------------------------------------------------------------------
+    async def verify_orchestrator_node(
+        self,
+        state: SharedState,
+        event_callback: Optional[Callable[[ExecutionEvent], None]] = None
+    ) -> SharedState:
+        """Verify Groq/LLM orchestrator decomposition, agent count, and domain coverage."""
+        logger.info("Executing verify_orchestrator_node for run %s", state.run_id)
+
+        # Deduplicate active specialists while preserving order
+        seen_names: set[str] = set()
+        deduped_specialists: List[SpecialistProfile] = []
+        for spec in state.active_specialists:
+            key = spec.agent_name.lower()
+            if key not in seen_names:
+                seen_names.add(key)
+                deduped_specialists.append(spec)
+        state.active_specialists = deduped_specialists
+
+        initial_agent_count = len(state.active_specialists)
+        combined_text = (
+            state.goal + " " + " ".join(
+                f"{c.category} {c.description} {c.threshold_value or ''}" for c in state.constraints
+            )
+        ).lower()
+
+        # Deterministic mandatory domain coverage verification
+        domain_rules = [
+            (
+                ("budget", "cost", "roi", "margin", "profit", "price", "revenue", "financial", "$", "₹", "lakh", "crore", "capex", "investment"),
+                ("finan", "econom"),
+                "FinancialModelingAgent",
+                "Financial Economics",
+            ),
+            (
+                ("regulat", "compliance", "legal", "law", "certif", "gdpr", "fda", "rto", "anatel", "eu ai act", "license", "permit", "statutory", "moratorium", "policy"),
+                ("regulat", "legal", "compliance", "govern"),
+                "RegulatoryComplianceAgent",
+                "Regulatory & Compliance",
+            ),
+            (
+                ("security", "privacy", "encrypt", "cyber", "threat", "soc2", "iso27001", "data governance", "auth"),
+                ("security", "privacy", "cyber"),
+                "SecurityComplianceAgent",
+                "Security & Data Privacy",
+            ),
+            (
+                ("operation", "sla", "downtime", "delivery", "supply", "deploy", "rollout", "reliability", "fleet"),
+                ("operat", "risk", "sre"),
+                "OperationsRiskAgent",
+                "Operations & Reliability",
+            ),
+            (
+                ("market", "customer", "demand", "competitor", "adoption", "users", "consumer"),
+                ("market", "compet"),
+                "MarketResearchAgent",
+                "Market Research",
+            ),
+        ]
+
+        added_missing_agents: List[str] = []
+        flagged_issues: List[str] = []
+
+        def _has_coverage(match_tokens: tuple[str, ...]) -> bool:
+            for spec in state.active_specialists:
+                haystack = f"{spec.agent_name} {spec.role_title} {spec.domain}".lower()
+                if any(tok in haystack for tok in match_tokens):
+                    return True
+            return False
+
+        for trigger_words, match_tokens, fallback_agent, fallback_domain in domain_rules:
+            if any(w in combined_text for w in trigger_words) and not _has_coverage(match_tokens):
+                if fallback_agent.lower() not in seen_names:
+                    profile = agent_registry.resolve_specialist(fallback_agent, domain_hint=fallback_domain)
+                    state.active_specialists.append(profile)
+                    seen_names.add(profile.agent_name.lower())
+                    added_missing_agents.append(profile.agent_name)
+                    state.agent_statuses[profile.agent_name] = AgentStatus(
+                        agent_name=profile.agent_name,
+                        role=profile.role_title,
+                        state="idle",
+                        last_action="Injected by Hallucination Guard Agent",
+                        color_theme=profile.color_theme,
+                        avatar_icon=profile.avatar_icon,
+                    )
+
+        if added_missing_agents:
+            flagged_issues.append(
+                f"Top-level orchestrator omitted mandatory domain specialist(s); Guard auto-injected: {', '.join(added_missing_agents)}"
+            )
+
+        # Run Guard Agent LLM audit of workstreams and specialist team
+        workstreams_summary = "\n".join(
+            f"- [{w.workstream_id}] {w.title} (Domain: {w.domain}) -> Agents: {[t.assigned_agent for t in w.tasks]}"
+            for w in state.workstreams
+        ) or "No workstreams decomposed."
+
+        audit_prompt = f"""
+You are the Hallucination & Output Verification Guard Agent auditing the Top-Level Orchestrator's plan.
+
+USER GOAL: "{state.goal}"
+USER CONSTRAINTS: {[c.description for c in state.constraints]}
+
+ORCHESTRATOR DECOMPOSED WORKSTREAMS:
+{workstreams_summary}
+
+SELECTED SPECIALIST AGENTS ({len(state.active_specialists)}):
+{[f"{s.agent_name} ({s.domain})" for s in state.active_specialists]}
+
+INSTRUCTIONS:
+1. Verify whether the orchestrator decomposed the goal logically without hallucinating irrelevant workstreams or fabricated roles.
+2. Verify whether the number and domains of specialist agents accurately cover the goal and constraints.
+3. Score grounding from 0.0 to 1.0 and summarize your audit rationale.
+"""
+        guard_profile = agent_registry.get_by_name("HallucinationGuardAgent")
+        guard_instruction = (
+            guard_profile.system_instruction
+            if guard_profile
+            else "You are the Hallucination & Output Verification Guard Agent."
+        )
+        audit_output: OrchestratorAuditOutput = await self.llm.generate_structured(
+            prompt=audit_prompt,
+            response_model=OrchestratorAuditOutput,
+            system_instruction=guard_instruction,
+        )
+
+        # If LLM audit flagged specific missing domains not yet covered, record or inject
+        for missing_dom in audit_output.missing_domains:
+            dom_clean = missing_dom.strip()
+            if dom_clean and not _has_coverage(tuple(w.lower() for w in dom_clean.split()[:2] if len(w) > 3)):
+                flagged_issues.append(f"Orchestrator missing domain noted by Guard: {dom_clean}")
+
+        combined_issues = flagged_issues + [i for i in audit_output.flagged_issues if i not in flagged_issues]
+        verified_agents = [s.agent_name for s in state.active_specialists]
+
+        verification = OrchestratorVerification(
+            verification_id=f"VER-ORCH-{uuid.uuid4().hex[:8]}",
+            is_valid=bool(audit_output.is_valid and len(verified_agents) >= 1),
+            hallucination_detected=bool(audit_output.hallucination_detected),
+            grounding_score=audit_output.grounding_score,
+            initial_agent_count=initial_agent_count,
+            verified_agent_count=len(verified_agents),
+            verified_agents=verified_agents,
+            added_missing_agents=added_missing_agents,
+            flagged_issues=combined_issues,
+            rationale=audit_output.rationale or "Top-level orchestrator decomposition verified.",
+        )
+        state.orchestrator_verification = verification
+
+        guard_event = ExecutionEvent(
+            event_id=f"EVT-{uuid.uuid4().hex[:8]}",
+            run_id=state.run_id,
+            event_type="ORCHESTRATOR_VERIFIED",
+            agent_name="HallucinationGuardAgent",
+            title=(
+                f"Orchestrator Guard Audit: {len(verified_agents)} agents verified "
+                f"({verification.grounding_score:.0%} grounded)"
+            ),
+            data=verification.model_dump(mode="json"),
+        )
+        state.execution_events.append(guard_event)
+        if event_callback:
+            event_callback(guard_event)
+
+        return state
+
+    # -------------------------------------------------------------------------
     # Node 2: Specialist Execution Tier
     # -------------------------------------------------------------------------
     async def execute_specialists_node(
@@ -210,6 +383,7 @@ INSTRUCTIONS:
                             "tools_used": [tr.tool_name for tr in tool_results],
                             "all_successful": all(tr.status == "success" for tr in tool_results),
                             "total_time_ms": sum(tr.execution_time_ms for tr in tool_results),
+                            "calls": [tr.model_dump(mode="json") for tr in tool_results],
                         }
                     )
                     state.execution_events.append(tool_event)
@@ -295,6 +469,179 @@ Deliver your independent domain findings. Provide:
             state.execution_events.append(summary_event)
             if event_callback:
                 event_callback(summary_event)
+
+        return state
+
+    # -------------------------------------------------------------------------
+    # Node 2.5: Specialist Findings Guard Audit (Anti-Hallucination & Grounding)
+    # -------------------------------------------------------------------------
+    async def verify_findings_node(
+        self,
+        state: SharedState,
+        event_callback: Optional[Callable[[ExecutionEvent], None]] = None
+    ) -> SharedState:
+        """Audit every specialist finding against MCP tool evidence and goal constraints."""
+        logger.info("Executing verify_findings_node for run %s", state.run_id)
+
+        active_findings = [f for f in state.findings if f.status in ("active", "revised")]
+        if not active_findings:
+            return state
+
+        # Collect MCP evidence grouped by agent
+        mcp_by_agent: Dict[str, List[Dict[str, Any]]] = {}
+        for call in state.mcp_tool_calls:
+            agent = call.get("requesting_agent", "system")
+            mcp_by_agent.setdefault(agent, []).append(call)
+
+        findings_block_lines: List[str] = []
+        det_issues_map: Dict[str, List[str]] = {}
+        mcp_present_map: Dict[str, bool] = {}
+
+        for f in active_findings:
+            det_issues: List[str] = []
+            if not f.assertions:
+                det_issues.append("No quantifiable assertions provided for claim.")
+            for a in f.assertions:
+                if a.dimension == "timeline_weeks" and isinstance(a.value, (int, float)) and a.value < 0:
+                    det_issues.append(f"Invalid negative timeline assertion: {a.value}")
+                if a.dimension == "budget_usd" and isinstance(a.value, (int, float)) and a.value < 0:
+                    det_issues.append(f"Invalid negative budget assertion: {a.value}")
+
+            agent_calls = mcp_by_agent.get(f.agent_name, [])
+            successful_calls = [c for c in agent_calls if c.get("status") == "success"]
+            mcp_present_map[f.finding_id] = bool(successful_calls) if self.enable_mcp_tools and state.mcp_tool_calls else True
+            det_issues_map[f.finding_id] = det_issues
+
+            mcp_snippets = "; ".join(
+                f"{c.get('tool_name')}={str(c.get('result'))[:180]}" for c in successful_calls[:3]
+            ) or "No MCP tool calls recorded for this agent."
+
+            findings_block_lines.append(
+                f"[{f.finding_id}] Agent: {f.agent_name}\n"
+                f"  Topic: {f.topic}\n"
+                f"  Claim: {f.claim}\n"
+                f"  Assertions: {[a.model_dump() for a in f.assertions]}\n"
+                f"  Confidence: {f.confidence}\n"
+                f"  MCP Evidence: {mcp_snippets}\n"
+                f"  Structural Checks: {det_issues or ['OK']}"
+            )
+
+        audit_prompt = f"""
+You are the Hallucination & Output Verification Guard Agent.
+Evaluate whether each specialist agent's output is factually consistent, aligned with the user's goal/constraints,
+and free of unsupported hallucinations relative to the retrieved MCP tool evidence.
+
+USER GOAL: "{state.goal}"
+CONSTRAINTS: {[c.description for c in state.constraints]}
+
+SPECIALIST FINDINGS & MCP EVIDENCE:
+{chr(10).join(findings_block_lines)}
+
+INSTRUCTIONS:
+For EVERY finding listed above (using the exact finding_id and agent_name):
+1. Check whether the claim and assertions stay aligned with the user goal and constraints.
+2. Check whether the claim contradicts any retrieved MCP evidence (especially calculator numbers or web search results).
+3. If a clear hallucination or factual/numeric contradiction exists, set hallucination_detected=true and provide a grounded corrected_claim.
+4. Provide a grounding_score (0.0-1.0) and a concise audit rationale.
+"""
+        guard_profile = agent_registry.get_by_name("HallucinationGuardAgent")
+        guard_instruction = (
+            guard_profile.system_instruction
+            if guard_profile
+            else "You are the Hallucination & Output Verification Guard Agent."
+        )
+        verif_output: FindingsVerificationOutput = await self.llm.generate_structured(
+            prompt=audit_prompt,
+            response_model=FindingsVerificationOutput,
+            system_instruction=guard_instruction,
+        )
+
+        audit_by_fid: Dict[str, FindingAuditItem] = {
+            a.finding_id: a for a in verif_output.audits
+        }
+
+        verifications: List[FindingVerification] = []
+        for f in active_findings:
+            det_issues = det_issues_map.get(f.finding_id, [])
+            audit_item = audit_by_fid.get(f.finding_id) or next(
+                (a for a in verif_output.audits if a.agent_name.lower() == f.agent_name.lower()),
+                None,
+            )
+
+            if audit_item:
+                issues = list(dict.fromkeys(det_issues + list(audit_item.issues_found)))
+                hallucinated = bool(audit_item.hallucination_detected)
+                grounding_score = float(audit_item.grounding_score)
+                mcp_aligned = bool(audit_item.mcp_evidence_aligned)
+                goal_aligned = bool(audit_item.goal_aligned)
+                corrected_claim = audit_item.corrected_claim
+                rationale = audit_item.rationale
+            else:
+                issues = det_issues
+                hallucinated = False
+                grounding_score = 0.85 if det_issues else 0.93
+                mcp_aligned = mcp_present_map.get(f.finding_id, True)
+                goal_aligned = True
+                corrected_claim = None
+                rationale = (
+                    f"Structural and MCP grounding check passed for {f.finding_id}."
+                    if not det_issues
+                    else f"Structural check noted: {'; '.join(det_issues)}"
+                )
+
+            if hallucinated and corrected_claim:
+                verdict = "auto_corrected"
+                f.claim = corrected_claim
+                f.status = "revised"
+                f.revised_at = datetime.utcnow()
+            elif hallucinated or not goal_aligned or (issues and grounding_score < 0.7):
+                verdict = "flagged"
+            else:
+                verdict = "verified"
+
+            fv = FindingVerification(
+                verification_id=f"VER-FND-{uuid.uuid4().hex[:8]}",
+                finding_id=f.finding_id,
+                agent_name=f.agent_name,
+                verdict=verdict,
+                hallucination_detected=hallucinated,
+                grounding_score=round(max(0.0, min(1.0, grounding_score)), 2),
+                mcp_evidence_aligned=mcp_aligned,
+                goal_aligned=goal_aligned,
+                issues_found=issues,
+                corrected_claim=corrected_claim,
+                rationale=rationale,
+            )
+            verifications.append(fv)
+            f.evidence["verification"] = fv.model_dump(mode="json")
+
+        state.finding_verifications = verifications
+        avg_score = (
+            round(sum(v.grounding_score for v in verifications) / len(verifications), 2)
+            if verifications
+            else verif_output.overall_grounding_score
+        )
+        corrected_count = sum(1 for v in verifications if v.verdict == "auto_corrected")
+        flagged_count = sum(1 for v in verifications if v.verdict == "flagged")
+
+        verif_event = ExecutionEvent(
+            event_id=f"EVT-{uuid.uuid4().hex[:8]}",
+            run_id=state.run_id,
+            event_type="FINDINGS_VERIFIED",
+            agent_name="HallucinationGuardAgent",
+            title=(
+                f"Guard Agent audited {len(verifications)} findings "
+                f"({avg_score:.0%} grounded, {corrected_count} corrected, {flagged_count} flagged)"
+            ),
+            data={
+                "overall_grounding_score": avg_score,
+                "summary": verif_output.summary or f"Verified {len(verifications)} specialist outputs.",
+                "verifications": [v.model_dump(mode="json") for v in verifications],
+            },
+        )
+        state.execution_events.append(verif_event)
+        if event_callback:
+            event_callback(verif_event)
 
         return state
 

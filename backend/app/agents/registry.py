@@ -114,6 +114,20 @@ BUILTIN_SPECIALISTS: List[SpecialistProfile] = [
         color_theme="#14b8a6",
         avatar_icon="HeartPulse",
         is_dynamic=False
+    ),
+    SpecialistProfile(
+        agent_name="HallucinationGuardAgent",
+        role_title="Hallucination & Output Verification Guard",
+        domain="LLM Grounding, Fact Verification & Hallucination Audit",
+        system_instruction=(
+            "You are the Hallucination & Output Verification Guard Agent. Your mandate is to independently "
+            "audit (1) whether the top-level orchestrator selected valid, non-hallucinated specialist agents "
+            "covering all domains implied by the goal and constraints, and (2) whether each specialist agent's "
+            "findings are factually grounded in retrieved MCP tool evidence and consistent with the user's goal."
+        ),
+        color_theme="#eab308",
+        avatar_icon="ShieldAlert",
+        is_dynamic=False
     )
 ]
 

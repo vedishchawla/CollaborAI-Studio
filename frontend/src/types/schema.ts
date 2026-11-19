@@ -263,6 +263,35 @@ export interface HITLConfig {
   auto_approve_timeout?: number;
 }
 
+export interface OrchestratorVerification {
+  verification_id: string;
+  is_valid: boolean;
+  hallucination_detected: boolean;
+  grounding_score: number;
+  initial_agent_count: number;
+  verified_agent_count: number;
+  verified_agents: string[];
+  added_missing_agents: string[];
+  flagged_issues: string[];
+  rationale: string;
+  checked_at: string;
+}
+
+export interface FindingVerification {
+  verification_id: string;
+  finding_id: string;
+  agent_name: string;
+  verdict: 'verified' | 'auto_corrected' | 'flagged';
+  hallucination_detected: boolean;
+  grounding_score: number;
+  mcp_evidence_aligned: boolean;
+  goal_aligned: boolean;
+  issues_found: string[];
+  corrected_claim?: string | null | undefined;
+  rationale: string;
+  checked_at: string;
+}
+
 export interface SharedState {
   run_id: string;
   goal: string;
@@ -280,6 +309,8 @@ export interface SharedState {
   execution_events: ExecutionEvent[];
   mcp_tool_calls: MCPToolResult[];
   mcp_tools_summary?: Record<string, any>;
+  orchestrator_verification?: OrchestratorVerification | null | undefined;
+  finding_verifications?: FindingVerification[] | undefined;
   hitl_checkpoints: HITLCheckpoint[];
   is_paused_for_hitl: boolean;
   active_hitl_checkpoint_id?: string;

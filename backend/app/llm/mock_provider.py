@@ -8,6 +8,7 @@ Guarantees reliable operation when offline or when Gemini Free Tier quota is dep
 from __future__ import annotations
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, Type, TypeVar
 from pydantic import BaseModel
 
@@ -25,7 +26,10 @@ from ..schemas.agent_io import (
     RevisedFindingItem,
     ClaimAttributionItem,
     RoadmapPhase,
-    RiskMitigationItem
+    RiskMitigationItem,
+    OrchestratorAuditOutput,
+    FindingAuditItem,
+    FindingsVerificationOutput,
 )
 from ..schemas.state import (
     Workstream,
@@ -96,6 +100,14 @@ class MockLLMProvider(BaseLLMProvider):
         # 8. Final Synthesis
         if response_model == SynthesisOutput:
             return self._mock_synthesis(prompt, prompt_lower)  # type: ignore
+
+        # 9. Orchestrator Decomposition Guard Audit
+        if response_model == OrchestratorAuditOutput:
+            return self._mock_orchestrator_audit(prompt)  # type: ignore
+
+        # 10. Per-Finding Hallucination & Grounding Guard Audit
+        if response_model == FindingsVerificationOutput:
+            return self._mock_findings_verification(prompt)  # type: ignore
 
         # Fallback to schema default instantiation
         try:
@@ -556,4 +568,45 @@ class MockLLMProvider(BaseLLMProvider):
                     confidence=0.91
                 )
             ]
+        )
+
+    def _mock_orchestrator_audit(self, prompt: str) -> OrchestratorAuditOutput:
+        """Audit the decomposed workstreams and specialist roster in simulation mode."""
+        return OrchestratorAuditOutput(
+            is_valid=True,
+            hallucination_detected=False,
+            grounding_score=0.95,
+            missing_domains=[],
+            flagged_issues=[],
+            rationale=(
+                "Top-level orchestrator decomposition verified: workstreams map directly to the stated "
+                "goal and constraints with non-overlapping specialist domains and zero hallucinated roles."
+            ),
+        )
+
+    def _mock_findings_verification(self, prompt: str) -> FindingsVerificationOutput:
+        """Audit individual specialist findings against MCP evidence and goal alignment."""
+        matches = re.findall(r"\[([A-Z0-9-]+)\]\s+Agent:\s+([^\n]+)", prompt)
+        audits: List[FindingAuditItem] = []
+        for finding_id, agent_name in matches:
+            audits.append(
+                FindingAuditItem(
+                    finding_id=finding_id.strip(),
+                    agent_name=agent_name.strip(),
+                    hallucination_detected=False,
+                    grounding_score=0.94,
+                    mcp_evidence_aligned=True,
+                    goal_aligned=True,
+                    issues_found=[],
+                    corrected_claim=None,
+                    rationale=(
+                        f"Finding {finding_id.strip()} by {agent_name.strip()} has consistent "
+                        "quantitative assertions, aligns with the primary goal, and matches retrieved MCP evidence."
+                    ),
+                )
+            )
+        return FindingsVerificationOutput(
+            audits=audits,
+            overall_grounding_score=0.94 if audits else 0.90,
+            summary=f"Hallucination Guard verified {len(audits)} specialist outputs with no factual contradictions detected.",
         )

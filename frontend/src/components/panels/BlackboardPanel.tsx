@@ -8,6 +8,7 @@ import {
   Clock,
   Layers,
   Sparkles,
+  ShieldCheck,
 } from 'lucide-react';
 import { Finding } from '../../types/schema';
 
@@ -143,6 +144,29 @@ export const BlackboardPanel: React.FC<BlackboardPanelProps> = ({
                     </span>
                   </div>
                 </div>
+
+                {/* Guard Agent Verification Badge */}
+                {finding.evidence?.['verification'] && (
+                  <div className="mb-2 flex items-center gap-1.5">
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded border inline-flex items-center gap-1 ${
+                        finding.evidence['verification'].verdict === 'auto_corrected'
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                          : finding.evidence['verification'].verdict === 'flagged'
+                          ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      }`}
+                    >
+                      <ShieldCheck className="w-3 h-3" />
+                      {finding.evidence['verification'].verdict === 'auto_corrected'
+                        ? 'Auto-Corrected'
+                        : finding.evidence['verification'].verdict === 'flagged'
+                        ? 'Flagged by Guard'
+                        : 'Guard Verified'}{' '}
+                      · {Math.round((finding.evidence['verification'].grounding_score ?? 0.9) * 100)}% grounded
+                    </span>
+                  </div>
+                )}
 
                 {/* Claim Statement */}
                 <p className="text-xs text-foreground mb-2 leading-relaxed font-medium">

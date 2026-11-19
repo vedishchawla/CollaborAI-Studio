@@ -166,3 +166,33 @@ class SynthesisOutput(BaseModel):
         description="Granular claim-level attributions back to specialists"
     )
 
+
+class OrchestratorAuditOutput(BaseModel):
+    """Structured output returned by the Guard Agent auditing top-level orchestrator decomposition."""
+    is_valid: bool = True
+    hallucination_detected: bool = False
+    grounding_score: float = Field(ge=0.0, le=1.0, default=0.94)
+    missing_domains: List[str] = Field(default_factory=list)
+    flagged_issues: List[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class FindingAuditItem(BaseModel):
+    """Audit evaluation for a single specialist finding."""
+    finding_id: str
+    agent_name: str
+    hallucination_detected: bool = False
+    grounding_score: float = Field(ge=0.0, le=1.0, default=0.92)
+    mcp_evidence_aligned: bool = True
+    goal_aligned: bool = True
+    issues_found: List[str] = Field(default_factory=list)
+    corrected_claim: Optional[str] = None
+    rationale: str = ""
+
+
+class FindingsVerificationOutput(BaseModel):
+    """Structured output returned by the Guard Agent auditing all specialist findings."""
+    audits: List[FindingAuditItem] = Field(default_factory=list)
+    overall_grounding_score: float = Field(ge=0.0, le=1.0, default=0.92)
+    summary: str = ""
+

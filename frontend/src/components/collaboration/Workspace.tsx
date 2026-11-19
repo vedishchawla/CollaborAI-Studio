@@ -45,6 +45,7 @@ import { BenchmarkModal } from '@/components/panels/BenchmarkModal';
 import { MCPPanel } from '@/components/panels/MCPPanel';
 import { HITLPanel } from '@/components/panels/HITLPanel';
 import { HITLModal } from '@/components/panels/HITLModal';
+import { VerificationGuardPanel } from '@/components/panels/VerificationGuardPanel';
 import { StudioAtmosphere } from '@/components/atmosphere/StudioAtmosphere';
 import { submitCheckpointDecision } from '@/services/api';
 import { HITLCheckpoint } from '@/types/schema';
@@ -56,7 +57,7 @@ export const Workspace: React.FC = () => {
   const [apiAvailable, setApiAvailable] = useState<boolean | null>(null);
   const [feedback, setFeedback] = useState('');
   const [view, setView] = useState<'overview' | 'recommendations' | 'traceability'>('overview');
-  const [activeTab, setActiveTab] = useState<'blackboard' | 'mcp' | 'hitl' | 'conflicts' | 'negotiation' | 'team' | 'timeline'>('blackboard');
+  const [activeTab, setActiveTab] = useState<'blackboard' | 'guard' | 'mcp' | 'hitl' | 'conflicts' | 'negotiation' | 'team' | 'timeline'>('blackboard');
 
   // Attribution inspection highlights
   const [highlightedAgents, setHighlightedAgents] = useState<string[]>([]);
@@ -228,6 +229,7 @@ export const Workspace: React.FC = () => {
 
   const tabs = [
     {id:'blackboard',label:'Findings',count:state?.findings.length||0},
+    {id:'guard',label:'Guard Audit',count:(state?.finding_verifications?.length||0)+(state?.orchestrator_verification?1:0)},
     {id:'mcp',label:'MCP Tools',count:state?.mcp_tool_calls?.length||0},
     {id:'hitl',label:'HITL Approvals',count:state?.hitl_checkpoints?.length||0},
     {id:'conflicts',label:'Conflicts',count:state?.conflicts.length||0},
@@ -248,6 +250,7 @@ export const Workspace: React.FC = () => {
     <section className="network-section"><div className="section-heading"><div><span className="section-kicker">02 / THE COLLABORATION</span><h2>Different minds. Shared direction.</h2></div><span className="text-xs text-muted-foreground">{String(state?.active_specialists.length||0).padStart(2,'0')} agents</span></div><ClientOnly fallback={<div className="collaboration-canvas"/>}><Suspense fallback={<div className="collaboration-canvas"/>}><AgentGraphView state={state} highlightedAgents={highlightedAgents}/></Suspense></ClientOnly><div className="process-strip">{['Goal','Orchestrate','Collaborate','Resolve','Recommend'].map((step,i)=><React.Fragment key={step}><span className={(state?.is_completed||i===0)?'process-current':''}><span className="process-number">{state?.is_completed?<Check size={10}/>:i+1}</span>{step}</span>{i<4&&<ChevronRight size={11}/>}</React.Fragment>)}</div></section>
     <div className="insight-layout"><section className="findings-section"><div className="panel-tabs" role="tablist" aria-label="Collaboration details">{tabs.map(tab=><Button key={tab.id} variant="ghost" role="tab" aria-selected={activeTab===tab.id} aria-controls="detail-panel" id={`tab-${tab.id}`} className={activeTab===tab.id?'tab-active':''} onClick={()=>setActiveTab(tab.id)}>{tab.label}<span>{tab.count}</span></Button>)}</div><div id="detail-panel" role="tabpanel" aria-labelledby={`tab-${activeTab}`}>
     {activeTab==='blackboard'&&<BlackboardPanel findings={state?.findings||[]} highlightedFindingIds={highlightedFindingIds}/>}
+    {activeTab==='guard'&&<VerificationGuardPanel orchestratorVerification={state?.orchestrator_verification} findingVerifications={state?.finding_verifications||[]}/>}
     {activeTab==='mcp'&&<MCPPanel toolCalls={state?.mcp_tool_calls||[]} toolsSummary={state?.mcp_tools_summary} currentRunId={currentRunId}/>}
     {activeTab==='hitl'&&<HITLPanel checkpoints={state?.hitl_checkpoints||[]} onOpenCheckpointModal={(chk)=>{setSelectedCheckpoint(chk);setIsHITLModalOpen(true);}}/>}
     {activeTab==='conflicts'&&<ConflictPanel conflicts={state?.conflicts||[]}/>}

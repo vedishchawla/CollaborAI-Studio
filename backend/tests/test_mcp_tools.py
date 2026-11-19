@@ -146,11 +146,33 @@ class TestBuiltinTools:
         assert result["query"] == "AI market trends"
         assert result["results_count"] == 3
         assert len(result["results"]) == 3
+        assert "source" in result and "MCP" in result["source"]
         for r in result["results"]:
             assert "title" in r
             assert "url" in r
             assert "snippet" in r
             assert "relevance_score" in r
+
+    @pytest.mark.asyncio
+    async def test_web_search_live_provider_source(self, monkeypatch):
+        from app.mcp import tools as mcp_tools
+
+        def fake_live(query: str, max_results: int):
+            return [{
+                "title": "Live Result",
+                "url": "https://en.wikipedia.org/wiki/Test",
+                "snippet": "Real snippet from Wikipedia",
+                "relevance_score": 0.96,
+            }]
+
+        monkeypatch.setattr(mcp_tools, "_fetch_live_web_results", fake_live)
+        mcp_tools._WEB_SEARCH_CACHE.clear()
+        mcp_tools._WEB_SEARCH_SOURCES.clear()
+
+        result = await web_search_handler({"query": "unique live query", "max_results": 3})
+        assert result["source"] == "MCP Live Web Search (Wikipedia & DuckDuckGo)"
+        assert result["results_count"] == 3
+        assert result["results"][0]["url"] == "https://en.wikipedia.org/wiki/Test"
 
     @pytest.mark.asyncio
     async def test_web_search_deterministic(self):
